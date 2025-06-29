@@ -1,7 +1,7 @@
 import os
 import json
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import customtkinter as ctk
 from tkinter import messagebox
 from matplotlib.figure import Figure
@@ -14,7 +14,6 @@ VALUES_FILE = os.path.join(BASE_DIR, 'utility_values.txt')
 HISTORY_FILE = os.path.join(BASE_DIR, 'utility_history.csv')
 
 # --- Load Config ---
-
 def load_config(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -24,7 +23,6 @@ COEFF = config['coefficients']
 UI_CFG = config.get('ui', {})
 
 # --- Initialization ---
-
 def init_files():
     if not os.path.exists(VALUES_FILE):
         with open(VALUES_FILE, 'w') as f:
@@ -32,35 +30,38 @@ def init_files():
     if not os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['date', 'hot_water', 'cold_water', 'electricity', 'total_cost'])
+            writer.writerow(['date', 'hot_usage', 'cold_usage', 'elec_usage', 'total_cost'])
 
 # --- Data I/O ---
-
 def read_previous_values():
     with open(VALUES_FILE, 'r') as f:
         lines = f.read().splitlines()
     return [float(x) for x in lines]
 
 
-def write_new_values(curr, total):
+def write_new_values(curr, usage, total):
+    # Save current readings
     with open(VALUES_FILE, 'w') as f:
         f.write("\n".join(str(v) for v in curr))
+    # Append usage history
     with open(HISTORY_FILE, 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().isoformat(timespec='seconds')] + curr + [total])
+        writer.writerow([datetime.now().isoformat(timespec='seconds')] + usage + [total])
 
 
 def read_history():
-    dates, totals = [], []
+    dates, hot_u, cold_u, elec_u, totals = [], [], [], [], []
     with open(HISTORY_FILE, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            dates.append(row['date'])
+            dates.append(datetime.fromisoformat(row['date']))
+            hot_u.append(float(row['hot_usage']))
+            cold_u.append(float(row['cold_usage']))
+            elec_u.append(float(row['elec_usage']))
             totals.append(float(row['total_cost']))
-    return dates, totals
+    return dates, hot_u, cold_u, elec_u, totals
 
 # --- Calculation ---
-
 def calculate_utility_cost(prev, curr):
     if any(c < p for c, p in zip(curr, prev)):
         raise ValueError('Текущие показания не могут быть меньше предыдущих!')
@@ -68,17 +69,16 @@ def calculate_utility_cost(prev, curr):
     cold_u = curr[1] - prev[1]
     elec_u = curr[2] - prev[2]
     sewage_u = hot_u + cold_u
-    cost = {
-        'hot': hot_u * COEFF['hot_water'],
-        'cold': cold_u * COEFF['cold_water'],
-        'sewage': sewage_u * COEFF['sewage'],
-        'elec': elec_u * COEFF['electricity']
-    }
-    total = round(sum(cost.values()), 2)
-    return total, hot_u, cold_u, sewage_u, elec_u
+    cost = (
+        hot_u * COEFF['hot_water'] +
+        cold_u * COEFF['cold_water'] +
+        sewage_u * COEFF['sewage'] +
+        elec_u * COEFF['electricity']
+    )
+    total = round(cost, 2)
+    return total, hot_u, cold_u, elec_u
 
 # --- Main Application ---
-
 class UtilityApp(ctk.CTk):
     def __init__(self, config):
         super().__init__()
@@ -91,7 +91,7 @@ class UtilityApp(ctk.CTk):
         init_files()
         self.prev_values = read_previous_values()
         # Tabview
-        self.tabview = ctk.CTkTabview(self, width=800)
+        self.tabview = ctk.CTkTabview(self, width=900)
         self.tabview.add("Расчет")
         self.tabview.add("История")
         self.tabview.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
@@ -123,23 +123,35 @@ class UtilityApp(ctk.CTk):
 
     def _build_history_tab(self):
         tab = self.tabview.tab("История")
-        btn_refresh = ctk.CTkButton(tab, text="Обновить", command=self._draw_history)
-        btn_refresh.pack(anchor='ne', padx=10, pady=10)
+        # Controls: period and view type
+        ctrl_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ctrl_frame.pack(fill='x', padx=20, pady=(10,0))
+        # Period selector
+        self.period_option = ctk.CTkOptionMenu(ctrl_frame,
+            values=["Все", "3 месяца", "6 месяцев", "1 год"],
+            command=lambda v: self._draw_history())
+        self.period_option.set("Все")
+        self.period_option.pack(side='left', padx=10)
+        # View type selector
+        self.view_option = ctk.CTkSegmentedButton(ctrl_frame,
+            values=["Общий", "Серии", "Гистограмма"],
+            command=lambda v: self._draw_history())
+        self.view_option.set("Общий")
+        self.view_option.pack(side='left', padx=10)
+        # History area
         self.hist_frame = ctk.CTkScrollableFrame(tab)
-        self.hist_frame.pack(fill='both', expand=True, padx=20, pady=(0,20))
-        # Initial draw
+        self.hist_frame.pack(fill='both', expand=True, padx=20, pady=10)
         self._draw_history()
 
     def on_calculate(self):
         try:
             curr = [float(e.get() or pv) for e, pv in zip(self.entries, self.prev_values)]
-            total, hu, cu, su, eu = calculate_utility_cost(self.prev_values, curr)
+            total, hu, cu, eu = calculate_utility_cost(self.prev_values, curr)
             self.result_lbl.configure(text=
                 f"Итоговая стоимость: {total} ₽\n"
-                f"Горячая вода: {hu} м³, Холодная вода: {cu} м³, Слив: {su} м³\n"
-                f"Электричество: {eu} кВт·ч"
+                f"Горячая вода: {hu} м³, Холодная вода: {cu} м³, Электричество: {eu} кВт·ч"
             )
-            write_new_values(curr, total)
+            write_new_values(curr, [hu, cu, eu], total)
             self.prev_values = curr
             self.tabview.set("История")
             self._draw_history()
@@ -147,27 +159,49 @@ class UtilityApp(ctk.CTk):
             messagebox.showerror('Ошибка ввода', str(e))
 
     def _draw_history(self):
-        # Clear history frame
         for widget in self.hist_frame.winfo_children():
             widget.destroy()
-        dates, totals = read_history()
-        # Table area
-        header = ctk.CTkLabel(self.hist_frame, text="Дата | Итог (₽)", font=('Segoe UI', 12, 'bold'))
+        dates, hot_u, cold_u, elec_u, totals = read_history()
+        # Filter by period
+        period = self.period_option.get()
+        if period != "Все":
+            days_map = {"3 месяца":90, "6 месяцев":180, "1 год":365}
+            cutoff = datetime.now() - timedelta(days=days_map.get(period, 0))
+            filtered = [(d, h, c, e, t) for d,h,c,e,t in zip(dates, hot_u, cold_u, elec_u, totals) if d >= cutoff]
+            if filtered:
+                dates, hot_u, cold_u, elec_u, totals = zip(*filtered)
+            else:
+                dates, hot_u, cold_u, elec_u, totals = [], [], [], [], []
+        # Display table
+        header = ctk.CTkLabel(self.hist_frame, text="Дата | Горячая | Холодная | Электр. | Итого", font=('Segoe UI', 12, 'bold'))
         header.pack(anchor='nw', padx=10, pady=(5,2))
-        for d, t in zip(dates, totals):
-            ctk.CTkLabel(self.hist_frame, text=f"{d} | {t}").pack(anchor='nw', padx=10)
-        # Graph area
+        for d,h,c,e,t in zip(dates, hot_u, cold_u, elec_u, totals):
+            ctk.CTkLabel(self.hist_frame, text=f"{d.date()} | {h} | {c} | {e} | {t}").pack(anchor='nw', padx=10)
+        # Draw chart
         fig = Figure(dpi=100)
         ax = fig.add_subplot(111)
-        if len(dates) > 1:
-            ax.plot(dates, totals, marker='o', linewidth=2)
-        elif len(dates) == 1:
-            ax.scatter(dates, totals, s=50)
-            ax.text(0.5, 0.5, 'Только одна точка', transform=ax.transAxes,
-                    ha='center', va='center')
-        else:
-            ax.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
-        ax.set_title("Динамика общей стоимости")
+        view = self.view_option.get()
+        x = list(range(len(dates)))
+        labels = [d.date() for d in dates]
+        if view == "Общий":
+            ax.plot(labels, totals, marker='o', linewidth=2)
+            ax.set_title("Общая стоимость")
+        elif view == "Серии":
+            ax.plot(labels, hot_u, marker='o', label='Горячая')
+            ax.plot(labels, cold_u, marker='o', label='Холодная')
+            ax.plot(labels, elec_u, marker='o', label='Электричество')
+            ax.set_title("Расходы по категориям")
+            ax.legend()
+        else:  # Гистограмма
+            width = 0.2
+            pos = x
+            ax.bar([p - width for p in pos], hot_u, width, label='Горячая')
+            ax.bar(pos, cold_u, width, label='Холодная')
+            ax.bar([p + width for p in pos], elec_u, width, label='Электричество')
+            ax.set_xticks(pos)
+            ax.set_xticklabels(labels, rotation=45)
+            ax.set_title("Гистограмма расходов")
+            ax.legend()
         ax.tick_params(axis='x', rotation=45)
         canvas = FigureCanvasTkAgg(fig, master=self.hist_frame)
         canvas.get_tk_widget().pack(fill='both', expand=False, padx=10, pady=10)
