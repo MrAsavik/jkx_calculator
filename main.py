@@ -14,6 +14,7 @@ VALUES_FILE = os.path.join(BASE_DIR, 'utility_values.txt')
 HISTORY_FILE = os.path.join(BASE_DIR, 'utility_history.csv')
 
 # --- Load Config ---
+
 def load_config(path):
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -23,6 +24,7 @@ COEFF = config['coefficients']
 UI_CFG = config.get('ui', {})
 
 # --- Initialization ---
+
 def init_files():
     if not os.path.exists(VALUES_FILE):
         with open(VALUES_FILE, 'w') as f:
@@ -33,6 +35,7 @@ def init_files():
             writer.writerow(['date', 'hot_water', 'cold_water', 'electricity', 'total_cost'])
 
 # --- Data I/O ---
+
 def read_previous_values():
     with open(VALUES_FILE, 'r') as f:
         lines = f.read().splitlines()
@@ -57,6 +60,7 @@ def read_history():
     return dates, totals
 
 # --- Calculation ---
+
 def calculate_utility_cost(prev, curr):
     if any(c < p for c, p in zip(curr, prev)):
         raise ValueError('Текущие показания не могут быть меньше предыдущих!')
@@ -74,6 +78,7 @@ def calculate_utility_cost(prev, curr):
     return total, hot_u, cold_u, sewage_u, elec_u
 
 # --- Main Application ---
+
 class UtilityApp(ctk.CTk):
     def __init__(self, config):
         super().__init__()
@@ -82,100 +87,92 @@ class UtilityApp(ctk.CTk):
         ctk.set_default_color_theme(UI_CFG.get('color_theme', 'blue'))
         # Window
         self.title("ЖКХ-CalculaTor")
-        self.state("zoomed")  # старт во весь экран
+        self.state("zoomed")
         init_files()
-        # Load last values
         self.prev_values = read_previous_values()
-        # Layout
-        self._configure_grid()
-        self._create_widgets()
-        self._draw_history()
+        # Tabview
+        self.tabview = ctk.CTkTabview(self, width=800)
+        self.tabview.add("Расчет")
+        self.tabview.add("История")
+        self.tabview.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self._build_calc_tab()
+        self._build_history_tab()
 
-    def _configure_grid(self):
-        for i in range(8):
-            self.grid_rowconfigure(i, weight=1)
-        for j in range(2):
-            self.grid_columnconfigure(j, weight=1)
-
-    def _create_widgets(self):
-        # CTkFrame for inputs
-        frame = ctk.CTkFrame(self, corner_radius=15)
-        frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=20, pady=20)
+    def _build_calc_tab(self):
+        tab = self.tabview.tab("Расчет")
+        tab.grid_columnconfigure(1, weight=1)
+        frame = ctk.CTkFrame(tab, corner_radius=15)
+        frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
         frame.grid_columnconfigure(1, weight=1)
-
-        # Input fields with placeholder = last value
         labels = ['Горячая вода (м3):', 'Холодная вода (м3):', 'Электричество (кВт·ч):']
         self.entries = []
-        for idx, text in enumerate(labels):
-            lbl = ctk.CTkLabel(frame, text=text, anchor='w')
-            lbl.grid(row=idx, column=0, sticky='w', padx=(10,5), pady=5)
-            entry = ctk.CTkEntry(frame,
-                                 placeholder_text=str(self.prev_values[idx]),
-                                 width=200)
-            entry.grid(row=idx, column=1, sticky='ew', padx=(5,10), pady=5)
-            self.entries.append(entry)
+        for i, txt in enumerate(labels):
+            lbl = ctk.CTkLabel(frame, text=txt, anchor='w')
+            lbl.grid(row=i, column=0, sticky='w', pady=5, padx=(10,5))
+            ent = ctk.CTkEntry(frame, placeholder_text=str(self.prev_values[i]))
+            ent.grid(row=i, column=1, sticky='ew', pady=5, padx=(5,10))
+            self.entries.append(ent)
+        btn_calc = ctk.CTkButton(frame, text="Рассчитать стоимость", command=self.on_calculate)
+        btn_calc.grid(row=3, column=0, columnspan=2, sticky="ew", pady=10, padx=20)
+        btn_hist = ctk.CTkButton(frame, text="Перейти в историю", command=lambda: self.tabview.set("История"))
+        btn_hist.grid(row=4, column=0, columnspan=2, sticky="ew", pady=5, padx=20)
+        self.result_lbl = ctk.CTkLabel(tab, text="", justify='left')
+        self.result_lbl.grid(row=1, column=0, sticky='nw', padx=20, pady=(0,10))
 
-        # Buttons aligned horizontally
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20)
-        btn_frame.grid_columnconfigure((0,1), weight=1)
-
-        self.btn_calc = ctk.CTkButton(btn_frame, text="Рассчитать стоимость",
-                                      command=self.on_calculate)
-        self.btn_calc.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
-        self.btn_prev = ctk.CTkButton(btn_frame, text="История показаний",
-                                      command=self.on_show_history)
-        self.btn_prev.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-
-        # Result label
-        self.result_lbl = ctk.CTkLabel(self, text="", justify='left')
-        self.result_lbl.grid(row=2, column=0, columnspan=2, sticky="w", padx=40)
+    def _build_history_tab(self):
+        tab = self.tabview.tab("История")
+        btn_refresh = ctk.CTkButton(tab, text="Обновить", command=self._draw_history)
+        btn_refresh.pack(anchor='ne', padx=10, pady=10)
+        self.hist_frame = ctk.CTkScrollableFrame(tab)
+        self.hist_frame.pack(fill='both', expand=True, padx=20, pady=(0,20))
+        # Initial draw
+        self._draw_history()
 
     def on_calculate(self):
         try:
             curr = [float(e.get() or pv) for e, pv in zip(self.entries, self.prev_values)]
             total, hu, cu, su, eu = calculate_utility_cost(self.prev_values, curr)
-            text = (
+            self.result_lbl.configure(text=
                 f"Итоговая стоимость: {total} ₽\n"
                 f"Горячая вода: {hu} м³, Холодная вода: {cu} м³, Слив: {su} м³\n"
                 f"Электричество: {eu} кВт·ч"
             )
-            self.result_lbl.configure(text=text)
             write_new_values(curr, total)
             self.prev_values = curr
+            self.tabview.set("История")
             self._draw_history()
         except ValueError as e:
             messagebox.showerror('Ошибка ввода', str(e))
 
-    def on_show_history(self):
-        # Open custom top-level instead of simple alert
-        hist_win = ctk.CTkToplevel(self)
-        hist_win.title("История показаний")
-        hist_win.geometry("400x300")
-        dates, totals = read_history()
-        txt = "Дата\tВсего (₽)\n" + "\n".join(f"{d}\t{t}" for d, t in zip(dates, totals))
-        text_box = ctk.CTkTextbox(hist_win, width=380, height=260, corner_radius=10)
-        text_box.insert("0.0", txt)
-        text_box.configure(state='disabled')
-        text_box.pack(padx=10, pady=10, expand=True, fill='both')
-
     def _draw_history(self):
+        # Clear history frame
+        for widget in self.hist_frame.winfo_children():
+            widget.destroy()
         dates, totals = read_history()
-        # Prevent weird axis if only one point
-        if len(dates) < 2:
-            return
-        # Remove old canvas
-        for w in self.grid_slaves(row=3):
-            w.destroy()
+        # Table area
+        header = ctk.CTkLabel(self.hist_frame, text="Дата | Итог (₽)", font=('Segoe UI', 12, 'bold'))
+        header.pack(anchor='nw', padx=10, pady=(5,2))
+        for d, t in zip(dates, totals):
+            ctk.CTkLabel(self.hist_frame, text=f"{d} | {t}").pack(anchor='nw', padx=10)
+        # Graph area
         fig = Figure(dpi=100)
         ax = fig.add_subplot(111)
-        ax.plot(dates, totals, marker='o', linewidth=2)
+        if len(dates) > 1:
+            ax.plot(dates, totals, marker='o', linewidth=2)
+        elif len(dates) == 1:
+            ax.scatter(dates, totals, s=50)
+            ax.text(0.5, 0.5, 'Только одна точка', transform=ax.transAxes,
+                    ha='center', va='center')
+        else:
+            ax.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
         ax.set_title("Динамика общей стоимости")
         ax.tick_params(axis='x', rotation=45)
-        canvas = FigureCanvasTkAgg(fig, master=self)
-        canvas.get_tk_widget().grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0,20))
+        canvas = FigureCanvasTkAgg(fig, master=self.hist_frame)
+        canvas.get_tk_widget().pack(fill='both', expand=False, padx=10, pady=10)
         canvas.draw()
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
     app = UtilityApp(config)
     app.mainloop()
