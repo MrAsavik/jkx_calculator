@@ -40,10 +40,8 @@ def read_previous_values():
 
 
 def write_new_values(curr, usage, total):
-    # Save current readings
     with open(VALUES_FILE, 'w') as f:
         f.write("\n".join(str(v) for v in curr))
-    # Append usage history
     with open(HISTORY_FILE, 'a', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([datetime.now().isoformat(timespec='seconds')] + usage + [total])
@@ -82,23 +80,48 @@ def calculate_utility_cost(prev, curr):
 class UtilityApp(ctk.CTk):
     def __init__(self, config):
         super().__init__()
-        # Appearance
+        # Appearance settings
         ctk.set_appearance_mode(UI_CFG.get('theme', 'dark'))
         ctk.set_default_color_theme(UI_CFG.get('color_theme', 'blue'))
+
         # Window
         self.title("ЖКХ-CalculaTor")
-        self.state("zoomed")
+        self._set_geometry('Расчет')
         init_files()
         self.prev_values = read_previous_values()
-        # Tabview
-        self.tabview = ctk.CTkTabview(self, width=900)
+
+        # Theme toggle
+        self.theme_switch = ctk.CTkOptionMenu(
+            self, values=["light", "dark"], command=self._on_theme_change)
+        self.theme_switch.set(ctk.get_appearance_mode())
+        self.theme_switch.grid(row=0, column=0, sticky='ne', padx=20, pady=10)
+
+        # Resizable Tabview
+        class ResizableTabview(ctk.CTkTabview):
+            def set(inner_self, name):
+                super().set(name)
+                inner_self.master._set_geometry(name)
+
+        self.tabview = ResizableTabview(self, width=900)
         self.tabview.add("Расчет")
         self.tabview.add("История")
-        self.tabview.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-        self.grid_rowconfigure(0, weight=1)
+        self.tabview.grid(row=1, column=0, sticky="nsew", padx=20, pady=0)
+        self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
+
+        # Build tabs
         self._build_calc_tab()
         self._build_history_tab()
+
+    def _on_theme_change(self, mode):
+        ctk.set_appearance_mode(mode)
+
+    def _set_geometry(self, tab_name):
+        # Set window size based on active tab
+        if tab_name == 'История':
+            self.geometry('1200x800')
+        else:
+            self.geometry('900x500')
 
     def _build_calc_tab(self):
         tab = self.tabview.tab("Расчет")
@@ -123,22 +146,18 @@ class UtilityApp(ctk.CTk):
 
     def _build_history_tab(self):
         tab = self.tabview.tab("История")
-        # Controls: period and view type
         ctrl_frame = ctk.CTkFrame(tab, fg_color="transparent")
         ctrl_frame.pack(fill='x', padx=20, pady=(10,0))
-        # Period selector
         self.period_option = ctk.CTkOptionMenu(ctrl_frame,
             values=["Все", "3 месяца", "6 месяцев", "1 год"],
             command=lambda v: self._draw_history())
         self.period_option.set("Все")
         self.period_option.pack(side='left', padx=10)
-        # View type selector
         self.view_option = ctk.CTkSegmentedButton(ctrl_frame,
             values=["Общий", "Серии", "Гистограмма"],
             command=lambda v: self._draw_history())
         self.view_option.set("Общий")
         self.view_option.pack(side='left', padx=10)
-        # History area
         self.hist_frame = ctk.CTkScrollableFrame(tab)
         self.hist_frame.pack(fill='both', expand=True, padx=20, pady=10)
         self._draw_history()
@@ -162,7 +181,6 @@ class UtilityApp(ctk.CTk):
         for widget in self.hist_frame.winfo_children():
             widget.destroy()
         dates, hot_u, cold_u, elec_u, totals = read_history()
-        # Filter by period
         period = self.period_option.get()
         if period != "Все":
             days_map = {"3 месяца":90, "6 месяцев":180, "1 год":365}
@@ -172,33 +190,38 @@ class UtilityApp(ctk.CTk):
                 dates, hot_u, cold_u, elec_u, totals = zip(*filtered)
             else:
                 dates, hot_u, cold_u, elec_u, totals = [], [], [], [], []
-        # Display table
         header = ctk.CTkLabel(self.hist_frame, text="Дата | Горячая | Холодная | Электр. | Итого", font=('Segoe UI', 12, 'bold'))
         header.pack(anchor='nw', padx=10, pady=(5,2))
         for d,h,c,e,t in zip(dates, hot_u, cold_u, elec_u, totals):
             ctk.CTkLabel(self.hist_frame, text=f"{d.date()} | {h} | {c} | {e} | {t}").pack(anchor='nw', padx=10)
-        # Draw chart
+        # Plotting
         fig = Figure(dpi=100)
         ax = fig.add_subplot(111)
         view = self.view_option.get()
-        x = list(range(len(dates)))
         labels = [d.date() for d in dates]
         if view == "Общий":
-            ax.plot(labels, totals, marker='o', linewidth=2)
+            if totals:
+                ax.plot(labels, totals, marker='o', linewidth=2)
             ax.set_title("Общая стоимость")
         elif view == "Серии":
-            ax.plot(labels, hot_u, marker='o', label='Горячая')
-            ax.plot(labels, cold_u, marker='o', label='Холодная')
-            ax.plot(labels, elec_u, marker='o', label='Электричество')
+            if hot_u:
+                ax.plot(labels, hot_u, marker='o', label='Горячая')
+            if cold_u:
+                ax.plot(labels, cold_u, marker='o', label='Холодная')
+            if elec_u:
+                ax.plot(labels, elec_u, marker='o', label='Электричество')
             ax.set_title("Расходы по категориям")
             ax.legend()
-        else:  # Гистограмма
+        else:
             width = 0.2
-            pos = x
-            ax.bar([p - width for p in pos], hot_u, width, label='Горячая')
-            ax.bar(pos, cold_u, width, label='Холодная')
-            ax.bar([p + width for p in pos], elec_u, width, label='Электричество')
-            ax.set_xticks(pos)
+            x = list(range(len(labels)))
+            if hot_u:
+                ax.bar([p - width for p in x], hot_u, width, label='Горячая')
+            if cold_u:
+                ax.bar(x, cold_u, width, label='Холодная')
+            if elec_u:
+                ax.bar([p + width for p in x], elec_u, width, label='Электричество')
+            ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=45)
             ax.set_title("Гистограмма расходов")
             ax.legend()
