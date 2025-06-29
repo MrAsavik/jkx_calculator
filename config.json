@@ -1,0 +1,11 @@
+{
+  "coefficients": {
+    "hot_water": 186.37,
+    "cold_water": 41.0,
+    "sewage": 28.1,
+    "electricity": 4.95
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}

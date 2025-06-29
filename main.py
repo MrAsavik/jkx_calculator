@@ -1,33 +1,36 @@
 import os
+import json
 import csv
 from datetime import datetime
-import tkinter as tk
-from tkinter import ttk, messagebox
+import customtkinter as ctk
+from tkinter import messagebox
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# --- Constants and File Paths ---
+# --- Configuration and Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 VALUES_FILE = os.path.join(BASE_DIR, 'utility_values.txt')
 HISTORY_FILE = os.path.join(BASE_DIR, 'utility_history.csv')
 
-# Utility coefficients
-COEFF = {
-    'hot_water': 186.37,
-    'cold_water': 41.00,
-    'sewage': 28.10,
-    'electricity': 4.95
-}
+# --- Load Config ---
+def load_config(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
-# --- File Initialization ---
+config = load_config(CONFIG_PATH)
+COEFF = config['coefficients']
+UI_CFG = config.get('ui', {})
+
+# --- Initialization ---
 def init_files():
-    # Initialize values file if missing
     if not os.path.exists(VALUES_FILE):
         with open(VALUES_FILE, 'w') as f:
             f.write("0.0\n0.0\n0.0")
-    # Initialize history CSV if missing
     if not os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['date', 'hot_water', 'cold_water', 'electricity'])
+            writer.writerow(['date', 'hot_water', 'cold_water', 'electricity', 'total_cost'])
 
 # --- Data I/O ---
 def read_previous_values():
@@ -36,104 +39,143 @@ def read_previous_values():
     return [float(x) for x in lines]
 
 
-def write_new_values(values):
+def write_new_values(curr, total):
     with open(VALUES_FILE, 'w') as f:
-        for v in values:
-            f.write(f"{v}\n")
-    # Append to history
+        f.write("\n".join(str(v) for v in curr))
     with open(HISTORY_FILE, 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().isoformat(timespec='seconds')] + values)
+        writer.writerow([datetime.now().isoformat(timespec='seconds')] + curr + [total])
 
-# --- Computation ---
+
+def read_history():
+    dates, totals = [], []
+    with open(HISTORY_FILE, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            dates.append(row['date'])
+            totals.append(float(row['total_cost']))
+    return dates, totals
+
+# --- Calculation ---
 def calculate_utility_cost(prev, curr):
-    # Ensure no negative usage
     if any(c < p for c, p in zip(curr, prev)):
-        raise ValueError('Текущие показания не могут быть меньше предыдущих.')
+        raise ValueError('Текущие показания не могут быть меньше предыдущих!')
+    hot_u = curr[0] - prev[0]
+    cold_u = curr[1] - prev[1]
+    elec_u = curr[2] - prev[2]
+    sewage_u = hot_u + cold_u
+    cost = {
+        'hot': hot_u * COEFF['hot_water'],
+        'cold': cold_u * COEFF['cold_water'],
+        'sewage': sewage_u * COEFF['sewage'],
+        'elec': elec_u * COEFF['electricity']
+    }
+    total = round(sum(cost.values()), 2)
+    return total, hot_u, cold_u, sewage_u, elec_u
 
-    hot_usage = curr[0] - prev[0]
-    cold_usage = curr[1] - prev[1]
-    sewage_usage = hot_usage + cold_usage
-    elec_usage = curr[2] - prev[2]
+# --- Main Application ---
+class UtilityApp(ctk.CTk):
+    def __init__(self, config):
+        super().__init__()
+        # Appearance
+        ctk.set_appearance_mode(UI_CFG.get('theme', 'dark'))
+        ctk.set_default_color_theme(UI_CFG.get('color_theme', 'blue'))
+        # Window
+        self.title("ЖКХ-CalculaTor")
+        self.state("zoomed")  # старт во весь экран
+        init_files()
+        # Load last values
+        self.prev_values = read_previous_values()
+        # Layout
+        self._configure_grid()
+        self._create_widgets()
+        self._draw_history()
 
-    hot_cost = hot_usage * COEFF['hot_water']
-    cold_cost = cold_usage * COEFF['cold_water']
-    sewage_cost = sewage_usage * COEFF['sewage']
-    elec_cost = elec_usage * COEFF['electricity']
+    def _configure_grid(self):
+        for i in range(8):
+            self.grid_rowconfigure(i, weight=1)
+        for j in range(2):
+            self.grid_columnconfigure(j, weight=1)
 
-    total = round(hot_cost + cold_cost + sewage_cost + elec_cost, 2)
-    return total, hot_usage, cold_usage, sewage_usage, elec_usage
+    def _create_widgets(self):
+        # CTkFrame for inputs
+        frame = ctk.CTkFrame(self, corner_radius=15)
+        frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=20, pady=20)
+        frame.grid_columnconfigure(1, weight=1)
 
-# --- UI Application ---
-def main():
-    init_files()
+        # Input fields with placeholder = last value
+        labels = ['Горячая вода (м3):', 'Холодная вода (м3):', 'Электричество (кВт·ч):']
+        self.entries = []
+        for idx, text in enumerate(labels):
+            lbl = ctk.CTkLabel(frame, text=text, anchor='w')
+            lbl.grid(row=idx, column=0, sticky='w', padx=(10,5), pady=5)
+            entry = ctk.CTkEntry(frame,
+                                 placeholder_text=str(self.prev_values[idx]),
+                                 width=200)
+            entry.grid(row=idx, column=1, sticky='ew', padx=(5,10), pady=5)
+            self.entries.append(entry)
 
-    root = tk.Tk()
-    root.title('Расчет стоимости ЖКХ')
-    root.geometry('450x350')
+        # Buttons aligned horizontally
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20)
+        btn_frame.grid_columnconfigure((0,1), weight=1)
 
-    main_frame = ttk.Frame(root, padding=20)
-    main_frame.pack(fill='both', expand=True)
+        self.btn_calc = ctk.CTkButton(btn_frame, text="Рассчитать стоимость",
+                                      command=self.on_calculate)
+        self.btn_calc.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        self.btn_prev = ctk.CTkButton(btn_frame, text="История показаний",
+                                      command=self.on_show_history)
+        self.btn_prev.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
 
-    # Validation: only allow float input
-    def validate_float(text):
-        if text == '':
-            return True
+        # Result label
+        self.result_lbl = ctk.CTkLabel(self, text="", justify='left')
+        self.result_lbl.grid(row=2, column=0, columnspan=2, sticky="w", padx=40)
+
+    def on_calculate(self):
         try:
-            float(text)
-            return True
-        except ValueError:
-            return False
-
-    vcmd = (root.register(validate_float), '%P')
-
-    # Input fields
-    labels = ['Горячая вода (м3):', 'Холодная вода (м3):', 'Электричество (кВт·ч):']
-    entries = []
-    for i, text in enumerate(labels):
-        lbl = ttk.Label(main_frame, text=text)
-        lbl.grid(row=i, column=0, sticky='w', pady=5)
-        var = tk.StringVar()
-        ent = ttk.Entry(main_frame, textvariable=var, validate='key', validatecommand=vcmd)
-        ent.grid(row=i, column=1, pady=5)
-        entries.append(var)
-
-    result_var = tk.StringVar()
-    result_lbl = ttk.Label(main_frame, textvariable=result_var, wraplength=400)
-    result_lbl.grid(row=4, column=0, columnspan=2, pady=10)
-
-    # Actions
-    def on_calculate():
-        try:
-            curr = [float(var.get()) for var in entries]
-            prev = read_previous_values()
-            total, hu, cu, su, eu = calculate_utility_cost(prev, curr)
-            result_var.set(
-                f"Итоговая стоимость: {total} руб\n"
-                f"Горячая вода: {hu} м3\n"
-                f"Холодная вода: {cu} м3\n"
-                f"Слив: {su} м3\n"
+            curr = [float(e.get() or pv) for e, pv in zip(self.entries, self.prev_values)]
+            total, hu, cu, su, eu = calculate_utility_cost(self.prev_values, curr)
+            text = (
+                f"Итоговая стоимость: {total} ₽\n"
+                f"Горячая вода: {hu} м³, Холодная вода: {cu} м³, Слив: {su} м³\n"
                 f"Электричество: {eu} кВт·ч"
             )
-            write_new_values(curr)
+            self.result_lbl.configure(text=text)
+            write_new_values(curr, total)
+            self.prev_values = curr
+            self._draw_history()
         except ValueError as e:
-            messagebox.showerror('Ошибка', str(e))
+            messagebox.showerror('Ошибка ввода', str(e))
 
-    def on_show_previous():
-        prev = read_previous_values()
-        messagebox.showinfo('Прошлые показания',
-                            f"Горячая вода: {prev[0]}\n"
-                            f"Холодная вода: {prev[1]}\n"
-                            f"Электричество: {prev[2]}")
+    def on_show_history(self):
+        # Open custom top-level instead of simple alert
+        hist_win = ctk.CTkToplevel(self)
+        hist_win.title("История показаний")
+        hist_win.geometry("400x300")
+        dates, totals = read_history()
+        txt = "Дата\tВсего (₽)\n" + "\n".join(f"{d}\t{t}" for d, t in zip(dates, totals))
+        text_box = ctk.CTkTextbox(hist_win, width=380, height=260, corner_radius=10)
+        text_box.insert("0.0", txt)
+        text_box.configure(state='disabled')
+        text_box.pack(padx=10, pady=10, expand=True, fill='both')
 
-    btn_calc = ttk.Button(main_frame, text='Рассчитать стоимость', command=on_calculate)
-    btn_calc.grid(row=5, column=0, columnspan=2, pady=10)
+    def _draw_history(self):
+        dates, totals = read_history()
+        # Prevent weird axis if only one point
+        if len(dates) < 2:
+            return
+        # Remove old canvas
+        for w in self.grid_slaves(row=3):
+            w.destroy()
+        fig = Figure(dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(dates, totals, marker='o', linewidth=2)
+        ax.set_title("Динамика общей стоимости")
+        ax.tick_params(axis='x', rotation=45)
+        canvas = FigureCanvasTkAgg(fig, master=self)
+        canvas.get_tk_widget().grid(row=3, column=0, columnspan=2, sticky="nsew", padx=20, pady=(0,20))
+        canvas.draw()
 
-    btn_prev = ttk.Button(main_frame, text='Показать прошлые значения', command=on_show_previous)
-    btn_prev.grid(row=6, column=0, columnspan=2)
-
-    root.mainloop()
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__':    
+    app = UtilityApp(config)
+    app.mainloop()
