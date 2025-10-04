@@ -79,24 +79,89 @@ def get_last_readings():
         return [0.0, 0.0, 0.0]
     return [hot_c[-1], cold_c[-1], elec_c[-1]]
 
-# --- Calculation ---
+# --- Calculation (по квитанции, без округлений) ---
 def calculate_utility_cost(prev, curr):
     if any(c < p for c, p in zip(curr, prev)):
         raise ValueError("Показания не могут быть меньше предыдущих!")
     hot   = curr[0] - prev[0]
     cold  = curr[1] - prev[1]
     elec  = curr[2] - prev[2]
-    sewage= hot + cold
-    cost  = (
-        hot   * COEFF['hot_water'] +
-        cold  * COEFF['cold_water'] +
-        sewage* COEFF['sewage'] +
-        elec  * COEFF['electricity']
-    )
-    return round(cost, 2), hot, cold, elec
+    sewage = hot + cold
+
+    breakdown = {}
+
+    # Приоритет: формула "по квитанции" (table component + conversion * tariff_gcal)
+    if all(k in COEFF for k in ('thermal_conversion', 'thermal_tariff_gcal', 'hot_water_table_component')):
+        table_comp = float(COEFF['hot_water_table_component'])
+        thermal_conv = float(COEFF['thermal_conversion'])
+        thermal_tariff = float(COEFF['thermal_tariff_gcal'])
+
+        # Без промежуточных округлений — сохраняем максимальную точность
+        hot_cost_water_component   = hot * table_comp
+        hot_cost_thermal_component = hot * thermal_conv * thermal_tariff
+        hot_total_cost = hot_cost_water_component + hot_cost_thermal_component
+        hot_unit_used = table_comp + thermal_conv * thermal_tariff
+
+        breakdown.update({
+            'hot_water_component_unit': table_comp,
+            'thermal_component_unit': thermal_conv * thermal_tariff,
+            'thermal_conv': thermal_conv,
+            'thermal_tariff_gcal': thermal_tariff,
+            'hot_water_component_cost': hot_cost_water_component,
+            'thermal_component_cost': hot_cost_thermal_component,
+            'hot_total_cost': hot_total_cost
+        })
+
+    # Если квитанционная формула отсутствует, но задан единый тариф — используем его (fallback)
+    elif 'hot_water' in COEFF:
+        hot_water_unit = float(COEFF.get('hot_water', 0.0))
+        hot_total_cost = hot * hot_water_unit
+        breakdown.update({
+            'hot_total_cost': hot_total_cost
+        })
+    else:
+        # Нету ни квитанционной формулы, ни единого тарифа — это ошибка конфигурации
+        raise ValueError("В config отсутствуют поля для расчёта горячей воды. "
+                         "Нужны либо thermal_conversion + thermal_tariff_gcal + hot_water_table_component, "
+                         "либо hot_water в coefficients.")
+
+    cold_cost = cold * COEFF.get('cold_water', 0.0)
+    sewage_cost = sewage * COEFF.get('sewage', 0.0)
+    elec_cost = elec * COEFF.get('electricity', 0.0)
+
+    total_cost = hot_total_cost + cold_cost + sewage_cost + elec_cost
+
+    breakdown.update({
+        'cold_cost': cold_cost,
+        'sewage_cost': sewage_cost,
+        'electricity_cost': elec_cost,
+        'total_cost': total_cost
+    })
+
+    return total_cost, hot, cold, elec, breakdown
 
 # --- Main Application ---
 class UtilityApp(ctk.CTk):
+    def _reset_form(self):
+        # включаем поля и заполняем их последними сохранёнными показаниями
+        for i, ent in enumerate(self.entries):
+            ent.configure(state="normal")
+            try:
+                ent.delete(0, "end")
+                ent.insert(0, str(self.prev_values[i]))
+            except Exception:
+                pass
+        # кнопки
+        self.btn_calc.configure(state="normal")
+        self.btn_copy.configure(state="disabled")
+        self.btn_reset.configure(state="disabled")
+        # очистить результат
+        self.result_lbl.configure(text="")
+        # вернуться на вкладку Расчет
+        self.tabview.set("Расчет")
+        self.entries[0].focus_set()
+
+
     def __init__(self, config):
         super().__init__()
         ctk.set_appearance_mode(UI_CFG.get('theme','dark'))
@@ -179,7 +244,7 @@ class UtilityApp(ctk.CTk):
                     raise ValueError("Введите все три текущих показания.")
                 curr.append(float(txt))
 
-            total, hu, cu, eu = calculate_utility_cost(self.prev_values, curr)
+            total, hu, cu, eu, breakdown = calculate_utility_cost(self.prev_values, curr)
             if hu==0 and cu==0 and eu==0:
                 raise ValueError("Показания совпадают с предыдущими — нет изменений.")
         except ValueError as e:
@@ -191,31 +256,96 @@ class UtilityApp(ctk.CTk):
         self.btn_copy.configure(state="normal")
         self.btn_reset.configure(state="normal")
 
-        self.result_lbl.configure(text=(
-            f"Итоговая стоимость: {total} ₽\n"
-            f"Горячая вода: {hu} м³\n"
-            f"Холодная вода: {cu} м³\n"
-            f"Электричество: {eu} кВт·ч"
-        ))
+        # Составляем детализированный текст результата — без округлений (максимальная точность)
+        lines = []
+        lines.append(f"Итоговая стоимость: {breakdown['total_cost']} ₽")
+        # горячая вода с возможным разложением (по квитанции)
+        if 'hot_water_component_cost' in breakdown and 'thermal_component_cost' in breakdown:
+            lines.append(f"Горячая вода: {hu} м³  — всего {breakdown['hot_total_cost']} ₽")
+            lines.append(f"  • Компонент горячей воды: {breakdown['hot_water_component_unit']} ₽/м³ → {breakdown['hot_water_component_cost']} ₽")
+            lines.append(f"  • Компонент тепловой энергии: {breakdown['thermal_component_unit']} ₽/м³ → {breakdown['thermal_component_cost']} ₽")
+            lines.append(f"  (итого тариф на горячую: {breakdown['hot_water_component_unit'] + breakdown['thermal_component_unit']} ₽/м³)")
+        else:
+            lines.append(f"Горячая вода: {hu} м³ → {breakdown['hot_total_cost']} ₽ (тариф {COEFF.get('hot_water')} ₽/м³)")
 
+        lines.append(f"Холодная вода: {cu} м³ → {breakdown['cold_cost']} ₽ (тариф {COEFF.get('cold_water')} ₽/м³)")
+        lines.append(f"Канализация (горячая+холодная = {hu+cu} м³) → {breakdown['sewage_cost']} ₽ (тариф {COEFF.get('sewage')} ₽/м³)")
+        lines.append(f"Электричество: {eu} кВт·ч → {breakdown['electricity_cost']} ₽ (тариф {COEFF.get('electricity')} ₽/кВт·ч)")
+
+        # Формула горячей воды: приоритет — формула по квитанции
+        thermal_conv = COEFF.get('thermal_conversion')
+        thermal_tariff = COEFF.get('thermal_tariff_gcal')
+        table_comp = COEFF.get('hot_water_table_component')
+        if thermal_conv and thermal_tariff and table_comp:
+            # формула на 1 м³ (по квитанции) — без округлений
+            one_m3 = table_comp + thermal_conv * thermal_tariff
+            lines.append("")
+            lines.append("Формула (по квитанции) для 1 м³ горячей воды:")
+            lines.append(f"  1 × {table_comp} + {thermal_conv} × {thermal_tariff} = {one_m3} ₽/м³")
+            # формула для текущего объёма
+            comp_water = hu * table_comp
+            comp_thermal = hu * thermal_conv * thermal_tariff
+            lines.append(f"Формула для текущего объёма ({hu} м³):")
+            lines.append(f"  {hu}×{table_comp} + {hu}×{thermal_conv}×{thermal_tariff} = {comp_water} + {comp_thermal} = {comp_water + comp_thermal} ₽")
+        elif 'hot_water_component_unit' in breakdown and 'thermal_component_unit' in breakdown:
+            # (на случай fallback на единый тариф или прочее)
+            wc = breakdown.get('hot_water_component_unit')
+            tc = breakdown.get('thermal_component_unit')
+            one_m3 = (wc or 0) + (tc or 0)
+            lines.append("")
+            lines.append("Формула (компоненты тарифа):")
+            lines.append(f"  1 × ({wc} + {tc}) = {one_m3} ₽/м³")
+            lines.append(f"  Для {hu} м³: {hu}×{wc} + {hu}×{tc} = {breakdown.get('hot_water_component_cost')} + {breakdown.get('thermal_component_cost')} = {breakdown.get('hot_total_cost')} ₽")
+        else:
+            # fallback — показать единичный тариф
+            lines.append("")
+            lines.append(f"Формула (простой тариф): 1 × {COEFF.get('hot_water')} ₽/м³ = {COEFF.get('hot_water')} ₽/м³")
+            lines.append(f"Для {hu} м³: {hu} × {COEFF.get('hot_water')} = {breakdown['hot_total_cost']} ₽")
+
+        # Для проверки — формула в одну строку
+        lines.append(f"\nПроверка: {breakdown['hot_total_cost']} + {breakdown['cold_cost']} + {breakdown['sewage_cost']} + {breakdown['electricity_cost']} = {breakdown['total_cost']} ₽")
+
+        self.result_lbl.configure(text="\n".join(lines))
+
+        # Сохраняем и переключаемся
         write_new_values(curr, [hu, cu, eu], total)
         self.prev_values = get_last_readings()
         self.tabview.set("История")
         self._draw_history()
 
     def _copy_result(self):
-        txt=self.result_lbl.cget("text")
-        self.clipboard_clear(); self.clipboard_append(txt)
-        messagebox.showinfo("Скопировано", "Результат скопирован в буфер обмена")
-
-    def _reset_form(self):
-        self.result_lbl.configure(text="")
+        # Формируем расширенный текст для копирования: предыдущие показания, текущие, полная формула горячей воды
+        prev = self.prev_values  # список [hot_prev, cold_prev, elec_prev]
+        # получаем текущие из полей (на случай, если пользователь сразу скопировал)
+        curr = []
         for ent in self.entries:
-            ent.configure(state="normal")
-            ent.delete(0,"end")
-        self.btn_calc.configure(state="normal")
-        self.btn_copy.configure(state="disabled")
-        self.btn_reset.configure(state="disabled")
+            txt = ent.get().strip()
+            curr.append(txt if txt else "(не введено)")
+
+        # Используем уже сформированный текст результата, если есть
+        res_text = self.result_lbl.cget("text")
+        # Дополняем заголовком с предыдущими показаниями (показываем прошлое значение, а не разницу)
+        header = []
+        header.append("Предыдущие показания (предыдущее значение):")
+        header.append(f"  Горячая вода (предыдущее): {prev[0]} м³")
+        header.append(f"  Холодная вода (предыдущее): {prev[1]} м³")
+        header.append(f"  Электричество (предыдущее): {prev[2]} кВт·ч")
+        header.append("")
+        header.append("Текущие показания (введено):")
+        header.append(f"  Горячая вода: {curr[0]}")
+        header.append(f"  Холодная вода: {curr[1]}")
+        header.append(f"  Электричество: {curr[2]}")
+        header.append("")
+
+        full_copy = "\n".join(header)
+        if res_text:
+            full_copy += "\nРезультат и формулы:\n" + res_text
+        else:
+            full_copy += "\n(Результат ещё не вычислен)"
+
+        self.clipboard_clear()
+        self.clipboard_append(full_copy)
+        messagebox.showinfo("Скопировано", "Показания и формулы скопированы в буфер обмена")
 
     def _build_history_tab(self):
         tab=self.tabview.tab("История")

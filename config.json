@@ -1,9 +1,12 @@
 {
   "coefficients": {
-    "hot_water": 186.37,
+    "hot_water": 211.44,                 
     "cold_water": 41.0,
     "sewage": 28.1,
-    "electricity": 4.95
+    "electricity": 4.95,
+    "thermal_conversion": 0.06508,       
+    "thermal_tariff_gcal": 2715.13,      
+    "hot_water_table_component": 34.74
   },
   "ui": {
     "theme": "dark"
